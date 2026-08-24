@@ -10,6 +10,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  statuses: write
 
 concurrency:
   group: dant3-mcp-registry-rescue
@@ -21,6 +22,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Fetch canonical public manifest
+        id: metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -46,6 +48,7 @@ jobs:
           fi
 
       - name: Install official MCP publisher
+        id: publisher
         if: steps.registry.outputs.needs_publish == 'true'
         shell: bash
         run: |
@@ -63,16 +66,19 @@ jobs:
           ./mcp-publisher --version
 
       - name: Authenticate with GitHub OIDC
+        id: oidc
         if: steps.registry.outputs.needs_publish == 'true'
         shell: bash
         run: ./mcp-publisher login github-oidc --registry https://registry.modelcontextprotocol.io
 
       - name: Publish Dant3 MCP 1.2.0
+        id: publish_server
         if: steps.registry.outputs.needs_publish == 'true'
         shell: bash
         run: ./mcp-publisher publish ./server.json
 
       - name: Verify exact Registry version
+        id: verify
         shell: bash
         run: |
           set -euo pipefail
@@ -89,3 +95,29 @@ jobs:
           done
           echo 'Dant3 Registry v1.2.0 not visible after publication window.' >&2
           exit 1
+
+      - name: Expose rescue outcome as commit status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          METADATA: ${{ steps.metadata.outcome }}
+          LOOKUP: ${{ steps.registry.outcome }}
+          PUBLISHER: ${{ steps.publisher.outcome }}
+          OIDC: ${{ steps.oidc.outcome }}
+          PUBLISH: ${{ steps.publish_server.outcome }}
+          VERIFY: ${{ steps.verify.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$VERIFY" = "success" ]; then
+            STATE=success
+            DESCRIPTION='Dant3 MCP Registry v1.2.0 confirmed'
+          else
+            STATE=failure
+            DESCRIPTION="Registry rescue failed: oidc=${OIDC} publish=${PUBLISH} verify=${VERIFY}"
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state="$STATE" \
+            -f context='dant3/registry-rescue' \
+            -f description="$DESCRIPTION" \
+            -f target_url="https://github.com/${GITHUB_REPOSITORY}/actions"
