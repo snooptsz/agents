@@ -1,0 +1,91 @@
+name: Dant3 MCP Registry rescue
+
+# Temporary owner-controlled rescue publisher for io.github.snooptsz/dant3.
+# Remove after Official MCP Registry v1.2.0 is confirmed.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: dant3-mcp-registry-rescue
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch canonical public manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL https://raw.githubusercontent.com/snooptsz/dant3-mcp/main/server.json -o server.json
+          jq -e '.name == "io.github.snooptsz/dant3"' server.json >/dev/null
+          jq -e '.version == "1.2.0"' server.json >/dev/null
+          jq -e '.repository.source == "github" and .repository.id == "1319457914"' server.json >/dev/null
+          jq -e '.remotes | any(.type == "streamable-http" and .url == "https://dant3.net/mcp")' server.json >/dev/null
+
+      - name: Check current Registry
+        id: registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$(curl -fsS --get \
+            --data-urlencode 'search=io.github.snooptsz/dant3' \
+            --data-urlencode 'limit=20' \
+            https://registry.modelcontextprotocol.io/v0.1/servers)"
+          if jq -e '.servers[]? | select(.server.name == "io.github.snooptsz/dant3" and .server.version == "1.2.0")' <<<"${payload}" >/dev/null; then
+            echo 'needs_publish=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'needs_publish=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install official MCP publisher
+        if: steps.registry.outputs.needs_publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=mcp-publisher_linux_amd64.tar.gz
+          latest_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/modelcontextprotocol/registry/releases/latest)"
+          version="${latest_url##*/}"
+          checksums="registry_${version#v}_checksums.txt"
+          base="https://github.com/modelcontextprotocol/registry/releases/download/${version}"
+          curl -fSL "${base}/${file}" -o "$file"
+          curl -fSL "${base}/${checksums}" -o checksums.txt
+          grep -E " ${file}$" checksums.txt | sha256sum -c -
+          tar xzf "$file" mcp-publisher
+          chmod +x mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Authenticate with GitHub OIDC
+        if: steps.registry.outputs.needs_publish == 'true'
+        shell: bash
+        run: ./mcp-publisher login github-oidc --registry https://registry.modelcontextprotocol.io
+
+      - name: Publish Dant3 MCP 1.2.0
+        if: steps.registry.outputs.needs_publish == 'true'
+        shell: bash
+        run: ./mcp-publisher publish ./server.json
+
+      - name: Verify exact Registry version
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 18); do
+            payload="$(curl -fsS --get \
+              --data-urlencode 'search=io.github.snooptsz/dant3' \
+              --data-urlencode 'limit=20' \
+              https://registry.modelcontextprotocol.io/v0.1/servers)"
+            if jq -e '.servers[]? | select(.server.name == "io.github.snooptsz/dant3" and .server.version == "1.2.0")' <<<"$payload" >/dev/null; then
+              echo 'Dant3 Registry v1.2.0 confirmed.'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'Dant3 Registry v1.2.0 not visible after publication window.' >&2
+          exit 1
